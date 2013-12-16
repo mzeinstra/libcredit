@@ -12,6 +12,7 @@ import sys
 import re
 import gettext
 import rdflib
+from rdflib.namespace import RDF
 from xml.dom import minidom
 
 # py3k compatibility
@@ -171,16 +172,25 @@ class Credit(object):
         self.attrib_url = get_url(self._get_property_any(subject, CC['attributionURL']))
 
         if self.attrib_text is None:
-            self.attrib_text = self._get_property_any(subject, [
+            creators = self._get_property_all(subject, [
                 DC['creator'],
                 DCTERMS['creator'],
-                'twitter:creator',
             ])
 
-        if self.attrib_text is not None and self.attrib_url is None:
+            if len(creators) == 1:
+                self.attrib_text = creators[0]
+            else:
+                # save the full list of creators for credit formatter
+                self.attrib_text = creators
+
+        # fallback to twitter:creator is dc*:creator fails
+        if not self.attrib_text:
+            self.attrib_text = self._get_property_any(subject, ['twitter:creator'])
+
+        if self.attrib_text and self.attrib_url is None:
             self.attrib_url = get_url(self.attrib_text)
 
-        if self.attrib_text is None:
+        if not self.attrib_text:
             self.attrib_text = self.attrib_url
 
         #
@@ -214,10 +224,10 @@ class Credit(object):
             # could we just use /people/XXX/ as the last resort?
             # flickr_by = urlparse.urlparse(str(flickr_by))[2].split('/')[-2]
 
-            if self.attrib_text is None and flickr_by:
+            if not self.attrib_text and flickr_by:
                 self.attrib_text = unicode(flickr_by)
 
-            if self.attrib_url is None and flickr_by:
+            if not self.attrib_url and flickr_by:
                 self.attrib_url = unicode(flickr_by)
 
 
@@ -244,9 +254,9 @@ class Credit(object):
         """
 
         markup = CREDIT_MARKUP[(
-            self.title_text is not None,
-            self.attrib_url is not None or self.attrib_text is not None,
-            self.license_url is not None or self.license_text is not None
+            bool(self.title_text),
+            bool(self.attrib_url) or bool(self.attrib_text),
+            bool(self.license_url) or bool(self.license_text)
         )]
 
         if not markup:
@@ -262,7 +272,13 @@ class Credit(object):
             if item == '<title>':
                 formatter.add_title(self.title_text, self.title_url)
             elif item == '<attrib>':
-                formatter.add_attrib(self.attrib_text, self.attrib_url)
+                if isinstance(self.attrib_text, (list, tuple)):
+                    for a, attrib in enumerate(self.attrib_text):
+                        formatter.add_attrib(attrib, None)
+                        if a+1 < len(self.attrib_text):
+                            formatter.add_text(", ")
+                else:
+                    formatter.add_attrib(self.attrib_text, self.attrib_url)
             elif item == '<license>':
                 formatter.add_license(self.license_text, self.license_url)
             else:
@@ -293,9 +309,47 @@ class Credit(object):
             try:
                 value = next(self.g[rdflib.URIRef(subject):rdflib.URIRef(property):])
                 if value:
-                    return unicode(value)
+                    if self._is_container(value):
+                        return self._parse_container(value)
+                    else:
+                        return unicode(value)
             except StopIteration:
                 pass
+
+    def _get_property_all(self, subject, properties):
+        subject = a2uri(subject)
+        result = []
+
+        if not isinstance(properties, list):
+            properties = [properties]
+
+        for property in properties:
+            property = a2uri(property)
+
+            for value in self.g[rdflib.URIRef(subject):rdflib.URIRef(property):]:
+                if self._is_container(value):
+                    result += self._parse_container(value)
+                else:
+                    result.append(unicode(value))
+
+        return result
+
+    def _is_container(self, subject):
+        if (subject, RDF.type, RDF.Alt) in self.g or \
+           (subject, RDF.type, RDF.Seq) in self.g or \
+           (subject, RDF.type, RDF.Bag) in self.g:
+            return True
+
+    def _parse_container(self, subject):
+        result = []
+        for item in rdflib.graph.Seq(self.g, subject):
+            result.append(unicode(item))
+        if (subject, RDF.type, RDF.Alt) in self.g:
+            return result[0]
+        else:
+            return result
+
+
 
 class CreditFormatter(object):
     """
